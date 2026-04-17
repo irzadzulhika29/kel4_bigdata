@@ -1,0 +1,136 @@
+services:
+  # 1. Database PostgreSQL (Hanya untuk simulasi data ERP/Odoo)
+  postgres:
+    image: postgres:13
+    container_name: bigdata-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-admin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-adminpassword}
+      - POSTGRES_DB=${POSTGRES_DB:-odoo_erp}
+    ports:
+      - "5432:5432"
+    networks:
+      - bigdata-net
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./init-sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-odoo_erp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres-seed:
+    image: postgres:13
+    container_name: bigdata-db-seed
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-admin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-adminpassword}
+      - POSTGRES_DB=${POSTGRES_DB:-odoo_erp}
+      - PGPASSWORD=${POSTGRES_PASSWORD:-adminpassword}
+    entrypoint: ["/bin/sh", "/seed-scripts/seed_customers.sh"]
+    networks:
+      - bigdata-net
+    restart: "no"
+    volumes:
+      - ./data/dataset:/seed-data:ro
+      - ./init-sql/seed_customers.sh:/seed-scripts/seed_customers.sh:ro
+
+  # 2. MinIO (Object Storage - Pengganti HDFS)
+  minio:
+    image: minio/minio
+    container_name: bigdata-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    networks:
+      - bigdata-net
+
+  # Otomatis buat bucket bronze, silver, gold
+  minio-init:
+    image: minio/mc
+    container_name: bigdata-minio-init
+    depends_on:
+      - minio
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      /usr/bin/mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+      /usr/bin/mc mb myminio/bronze --ignore-existing;
+      /usr/bin/mc mb myminio/silver --ignore-existing;
+      /usr/bin/mc mb myminio/gold --ignore-existing;
+      exit 0;
+      "
+    networks:
+      - bigdata-net
+
+  # 3. Spark Cluster (Master & Worker)
+  spark-master:
+    image: bitnamilegacy/spark:3.5.0
+    container_name: bigdata-spark-master
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    networks:
+      - bigdata-net
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/work/data
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.5.0
+    container_name: bigdata-spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=${SPARK_MASTER_URL:-spark://spark-master:7077}
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-4G}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+    depends_on:
+      - spark-master
+    networks:
+      - bigdata-net
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/work/data
+
+  # 4. Jupyter Notebook
+  jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: bigdata-jupyter
+    user: root
+    ports:
+      - "${JUPYTER_PORT:-8888}:8888"
+    environment:
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-bigdata2024}
+      - PYSPARK_PYTHON=python3
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/work/data
+      - ./jars:/home/jovyan/work/jars
+    networks:
+      - bigdata-net
+    depends_on:
+      spark-master:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      postgres-seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+
+networks:
+  bigdata-net:
+    driver: bridge

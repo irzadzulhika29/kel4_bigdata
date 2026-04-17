@@ -1,0 +1,19 @@
+# Environment
+.env
+
+# Docker volumes
+postgres_data/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Dataset (ukuran besar, unduh via downloader.py)
+data/dataset/
+
+.claude
+
+jars/*.jar
